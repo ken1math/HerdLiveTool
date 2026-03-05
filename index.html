@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Herd Live - Realtime Party Game</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue, update, remove, get } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+
+        // --- 1. 設定と初期化 ---
+        const urlParams = new URLSearchParams(window.location.search);
+        const apiKey = urlParams.get('k');
+        const roomId = urlParams.get('room');
+        const isGM = urlParams.get('gm') === '1';
+
+        window.addEventListener('DOMContentLoaded', () => {
+            if (!apiKey) {
+                // APIキーがない場合
+                document.getElementById('configModal').style.display = 'flex';
+                document.getElementById('lobbyContainer').style.display = 'none';
+                document.getElementById('gameContainer').style.display = 'none';
+            } else if (!roomId) {
+                // キーはあるが部屋にいない（ロビー）
+                document.getElementById('lobbyContainer').style.display = 'block';
+                document.getElementById('gameContainer').style.display = 'none';
+                startApp(apiKey);
+            } else {
+                // 部屋にいる
+                document.getElementById('lobbyContainer').style.display = 'none';
+                document.getElementById('gameContainer').style.display = 'grid';
+                document.getElementById('roomDisplayId').textContent = roomId; // ここで確実に表示
+                startApp(apiKey);
+            }
+        });
+
+        window.saveApiKey = () => {
+            const val = document.getElementById('apiKeyInput').value.trim();
+            if (val.startsWith('AIza')) {
+                urlParams.set('k', val);
+                window.location.search = urlParams.toString();
+            } else {
+                alert("正しいAPIキーを入力してください");
+            }
+        };
+
+        function startApp(validKey) {
+            const firebaseConfig = {
+                apiKey: validKey,
+                authDomain: "herd-tool.firebaseapp.com",
+                databaseURL: "https://herd-tool-default-rtdb.asia-southeast1.firebasedatabase.app",
+                projectId: "herd-tool",
+                storageBucket: "herd-tool.firebasestorage.app",
+                messagingSenderId: "259594252630",
+                appId: "1:259594252630:web:dc84dda548d5d58c9ae6f7"
+            };
+
+            const app = initializeApp(firebaseConfig);
+            const db = getDatabase(app);
+            const gameRef = roomId ? ref(db, 'rooms/' + roomId) : null;
+
+            // --- 共通関数 ---
+            window.createRoom = () => {
+                const newId = Math.random().toString(36).substring(2, 8);
+                set(ref(db, 'rooms/' + newId), { round: 1, status: "waiting", createdAt: Date.now() }).then(() => {
+                    window.location.href = `${window.location.origin}${window.location.pathname}?room=${newId}&gm=1&k=${validKey}`;
+                });
+            };
+
+            window.joinRoom = async () => {
+                const inputId = document.getElementById('roomInputId').value.trim().toLowerCase();
+                if(!inputId) return alert("ルームIDを入力してください");
+                const snapshot = await get(ref(db, 'rooms/' + inputId));
+                if (snapshot.exists()) {
+                    window.location.href = `${window.location.origin}${window.location.pathname}?room=${inputId}&k=${validKey}`;
+                } else { alert("ルームIDが見つかりません。"); }
+            };
+
+            // --- ゲーム内アクション ---
+            window.getPlayerUrl = () => `${window.location.origin}${window.location.pathname}?room=${roomId}&k=${validKey}`;
+            
+            window.copyPlayerUrl = () => {
+                navigator.clipboard.writeText(getPlayerUrl()).then(() => alert("招待URLをコピーしました！"));
+            };
+
+            window.toggleQrCode = () => {
+                const modal = document.getElementById('qrModal');
+                const qrContainer = document.getElementById('qrImageContainer');
+                if (modal.style.display === 'none' || modal.style.display === '') {
+                    qrContainer.innerHTML = "";
+                    new QRCode(qrContainer, { text: getPlayerUrl(), width: 512, height: 512 });
+                    modal.style.display = 'flex';
+                } else { modal.style.display = 'none'; }
+            };
+
+            window.sendTopic = () => {
+                const topic = document.getElementById('topicInput').value.trim();
+                if(topic) update(gameRef, { topic: topic });
+            };
+
+            window.sendAnswer = () => {
+                const name = document.getElementById('userName').value.trim();
+                const text = document.getElementById('userAnswer').value.trim();
+                if(!name || !text) return alert("名前と回答を入力してください");
+                localStorage.setItem('herd_player_name', name);
+                set(ref(db, `rooms/${roomId}/answers/${name}`), text);
+                set(ref(db, `rooms/${roomId}/players/${name}`), true);
+                document.getElementById('inputForm').style.display = 'none';
+                document.getElementById('sentStatus').style.display = 'block';
+            };
+
+            window.toggleOpen = (status) => { update(gameRef, { status: status }); };
+            window.resetAnswers = () => { if(confirm("消去？")) { remove(ref(db, `rooms/${roomId}/answers`)); update(gameRef, { status: 'waiting' }); } };
+            window.unlockName = () => { const i = document.getElementById('userName'); i.readOnly = false; i.style.background = "#fff"; document.getElementById('editNameBtn').style.display = 'none'; };
+
+            // --- 同期処理 ---
+            if (roomId) {
+                onValue(gameRef, (snapshot) => {
+                    const data = snapshot.val();
+                    if (!data) return;
+                    
+                    window.currentHistory = data.history || [];
+                    window.currentRound = data.round || 1;
+                    window.currentCowHolder = data.cowHolder || "なし";
+                    window.currentTopic = data.topic || "";
+                    window.lastState = data.lastState || null;
+                    window.currentPlayers = data.players || {};
+                    const status = data.status || 'waiting';
+                    const answers = data.answers || {};
+
+                    document.getElementById('displayTopic').textContent = window.currentTopic || "お題を待っています...";
+                    document.getElementById('statusMsg').textContent = (status === 'waiting') ? `現在 ${Object.keys(answers).length} 人が回答済み...` : `📢 いっせい公開！`;
+                    
+                    const resultBox = document.getElementById('resultBox');
+                    if (status === 'open') {
+                        resultBox.style.display = 'block';
+                        resultBox.innerHTML = Object.entries(answers).map(([n, t]) => `<div class="answer-row"><div class="answer-name">${n}</div><div class="answer-text">${t}</div></div>`).join("");
+                    } else {
+                        resultBox.style.display = 'none';
+                        if (Object.keys(answers).length === 0) {
+                            document.getElementById('inputForm').style.display = 'block';
+                            document.getElementById('sentStatus').style.display = 'none';
+                        }
+                    }
+
+                    const players = Object.keys(window.currentPlayers).sort();
+                    refreshScoreDisplay(players, window.currentHistory, window.currentCowHolder);
+                    if(isGM) updateGMControls(players, window.currentCowHolder);
+                });
+            }
+        }
+
+        // --- UI更新系 (関数外に出さない) ---
+        function refreshScoreDisplay(players, history, cow) {
+            const body = document.getElementById('historyBody');
+            if(!players.length) return;
+            let scores = {};
+            players.forEach(p => scores[p] = 0);
+            history.forEach(h => h.winners?.forEach(w => { if(scores.hasOwnProperty(w)) scores[w]++; }));
+            const sorted = [...players].sort((a, b) => scores[b] - scores[a]);
+            document.getElementById('historyHead').innerHTML = "<th>R</th>" + sorted.map(p => `<th>${p.substring(0,3)}</th>`).join("");
+            let total = `<tr class="total"><td>計</td>` + sorted.map(p => `<td>${scores[p]}${p === cow ? '🐄' : ''}</td>`).join("") + `</tr>`;
+            let rows = [...history].reverse().map(h => `<tr><td>${h.round}</td>` + sorted.map(p => (h.winners?.includes(p)) ? "<td class='win'>◯</td>" : "<td>-</td>").join("") + "</tr>").join("");
+            body.innerHTML = total + rows;
+        }
+
+        function updateGMControls(players, cow) {
+            const area = document.getElementById('scoringArea');
+            area.innerHTML = players.map(p => `<div class="player-tile" onclick="this.classList.toggle('selected')">${p}</div>`).join("");
+            document.getElementById('cowSelect').innerHTML = '<option value="なし">なし</option>' + players.map(p => `<option value="${p}" ${p === cow ? 'selected' : ''}>${p}</option>`).join("");
+        }
+
+        // スコア確定などのグローバル関数
+        window.confirmScore = () => {
+            const winners = Array.from(document.querySelectorAll('.player-tile.selected')).map(el => el.textContent);
+            const newCow = document.getElementById('cowSelect').value;
+            const gameRef = ref(getDatabase(), 'rooms/' + urlParams.get('room'));
+            update(gameRef, { 
+                history: [...(window.currentHistory || []), { round: window.currentRound, winners, currentCow: newCow, topic: window.currentTopic }],
+                round: window.currentRound + 1, cowHolder: newCow, status: 'waiting', answers: {} 
+            });
+        };
+    </script>
+    <style>
+        :root { --primary: #5865F2; --success: #2ecc71; --danger: #ff4d4d; --gray: #f4f7f9; }
+        body { font-family: sans-serif; background: var(--gray); margin: 0; padding: 10px; font-size: 14px; color: #333; }
+        .container { max-width: 800px; margin: 0 auto; display: grid; gap: 12px; }
+        .card { background: white; padding: 15px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.05); position: relative; }
+        h2 { font-size: 0.8rem; margin: 0 0 10px; border-left: 4px solid var(--primary); padding-left: 8px; color: #666; }
+        input, button, select { width: 100%; padding: 12px; margin: 4px 0; border-radius: 8px; border: 1px solid #ddd; box-sizing: border-box; font-size: 16px; }
+        button { background: var(--primary); color: white; border: none; font-weight: bold; cursor: pointer; }
+        .room-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px !important; background: #333 !important; color: white !important; border-radius: 12px; }
+        .invite-btn { width: auto !important; padding: 6px 10px !important; font-size: 0.7rem !important; margin: 0 !important; background: #555 !important; }
+        .player-tile { padding: 10px; border: 1px solid #ddd; border-radius: 8px; text-align: center; cursor: pointer; }
+        .player-tile.selected { background: var(--success); color: white; border-color: var(--success); }
+        .answer-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        .answer-name { flex: 0 0 70px; font-weight: bold; text-align: right; color: #666; }
+        .answer-text { flex: 1; background: #fffbe6; padding: 8px 12px; border-radius: 0 10px 10px 10px; border: 1px solid #ffe58f; font-size: 1.1rem; }
+        table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+        th, td { border: 1px solid #eee; padding: 8px 2px; text-align: center; }
+        .total { background: #f0f1ff; font-weight: bold; }
+        .topic-display { font-size: 1.6rem; font-weight: bold; text-align: center; padding: 10px; }
+        .modal-overlay { display: none; position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background: rgba(0,0,0,0.9); justify-content: center; align-items: center; z-index: 9999; flex-direction: column; }
+        #qrImageContainer { background: white; padding: 10px; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+<div id="configModal" class="modal-overlay">
+    <div class="card" style="max-width: 400px; width: 90%; text-align: center;">
+        <h1>🐄</h1>
+        <h2>Firebase設定が必要です</h2>
+        <input type="password" id="apiKeyInput" placeholder="AIzaSy...">
+        <button onclick="saveApiKey()" style="background:var(--success); margin-top:10px;">適用して開始</button>
+    </div>
+</div>
+
+<div id="qrModal" class="modal-overlay" onclick="this.style.display='none'">
+    <div id="qrImageContainer" onclick="event.stopPropagation()"></div>
+    <div style="color:white; margin-top:15px;">タップで閉じる</div>
+</div>
+
+<div id="lobbyContainer" style="display:none; text-align: center; padding: 50px 20px;">
+    <div class="card" style="max-width: 400px; margin: 0 auto;">
+        <h1>🐄 Herd Live</h1>
+        <button onclick="createRoom()" style="padding: 20px; font-size: 1.2rem;">新しい部屋を作る (GM)</button>
+        <div style="margin-top:30px; border-top:1px solid #eee; padding-top:20px;">
+            <input type="text" id="roomInputId" placeholder="ルームID" style="text-align:center;">
+            <button onclick="joinRoom()" style="background:var(--success)">参加</button>
+        </div>
+    </div>
+</div>
+
+<div id="gameContainer" class="container" style="display:none;">
+    <div class="card room-header">
+        <span>ROOM: <strong id="roomDisplayId">---</strong></span>
+        <div class="gm-only">
+            <button class="invite-btn" onclick="toggleQrCode()">📢 QR</button>
+            <button class="invite-btn" onclick="copyPlayerUrl()">🔗 URL</button>
+        </div>
+    </div>
+    
+    <div class="card">
+        <h2>🎯 お題</h2>
+        <div id="displayTopic" class="topic-display">待機中...</div>
+    </div>
+
+    <div class="card gm-only">
+        <h2>📝 出題 (GM)</h2>
+        <div style="display:flex; gap:5px;"><input type="text" id="topicInput"><button onclick="sendTopic()" style="width:70px;">出題</button></div>
+    </div>
+
+    <div class="card">
+        <h2>🐄 あなたの回答</h2>
+        <div id="inputForm">
+            <div style="display:flex; gap:5px;"><input type="text" id="userName" placeholder="名前" style="flex:4;"><button id="editNameBtn" onclick="unlockName()" style="flex:1; display:none; font-size:0.7rem;">変更</button></div>
+            <input type="text" id="userAnswer" placeholder="答え">
+            <button onclick="sendAnswer()" style="background:var(--success); margin-top:10px;">送信</button>
+        </div>
+        <div id="sentStatus" style="display:none; text-align:center; color:var(--success);"><h3>送信完了！🐄</h3></div>
+    </div>
+
+    <div class="card">
+        <h2>📢 公開</h2>
+        <div id="statusMsg" style="font-weight:bold; color:var(--primary); margin-bottom:10px;"></div>
+        <div id="resultBox"></div>
+        <div class="gm-only"><button onclick="toggleOpen('open')" style="background:var(--success); margin-top:10px;">いっせい公開！</button><button onclick="resetAnswers()" style="background:#888; margin-top:5px; font-size:0.7rem;">次のお題へ (リセット)</button></div>
+    </div>
+
+    <div class="card gm-only">
+        <h2>📈 スコア判定 (GM)</h2>
+        <div id="scoringArea" style="display:grid; grid-template-columns:repeat(auto-fill, minmax(80px, 1fr)); gap:5px;"></div>
+        <div style="margin:10px 0;">牛保持者: <select id="cowSelect" style="width:auto;"></select></div>
+        <button onclick="confirmScore()">スコア確定</button>
+    </div>
+
+    <div class="card">
+        <h2>📊 スコア表</h2>
+        <div style="overflow-x:auto;"><table><thead><tr id="historyHead"><th>R</th></tr></thead><tbody id="historyBody"></tbody></table></div>
+    </div>
+</div>
+
+<script>
+    // 名前復元用
+    const sn = localStorage.getItem('herd_player_name');
+    if(sn) {
+        const i = document.getElementById('userName');
+        i.value = sn; i.readOnly = true; i.style.background = "#eee";
+        document.getElementById('editNameBtn').style.display = 'inline-block';
+    }
+</script>
+
+</body>
+</html>
