@@ -15,8 +15,11 @@
         input, button, select { width: 100%; padding: 12px; margin: 4px 0; border-radius: 8px; border: 1px solid #ddd; box-sizing: border-box; font-size: 16px; }
         button { background: var(--primary); color: white; border: none; font-weight: bold; cursor: pointer; }
         
-        /* GMメニューはデフォルトで非表示 */
+        /* GMメニュー */
         .gm-only { display: none !important; }
+
+        /* エラー画面用 */
+        #errorOverlay { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: white; z-index: 10000; justify-content: center; align-items: center; text-align: center; flex-direction: column; padding: 20px; }
 
         .room-header { display: flex; justify-content: space-between; align-items: center; padding: 10px 15px !important; background: #333 !important; color: white !important; border-radius: 12px; }
         .invite-btn { width: auto !important; padding: 6px 10px !important; font-size: 0.7rem !important; margin: 0 !important; background: #555 !important; }
@@ -36,13 +39,14 @@
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-app.js";
         import { getDatabase, ref, set, onValue, update, remove, get } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-database.js";
+        // 認証用モジュール
+        import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.0/firebase-auth.js";
 
         const urlParams = new URLSearchParams(window.location.search);
         const apiKey = urlParams.get('k');
         const roomId = urlParams.get('room');
         const isGM = urlParams.get('gm') === '1';
 
-        // 初期化処理
         window.addEventListener('DOMContentLoaded', () => {
             if (!apiKey) {
                 document.getElementById('configModal').style.display = 'flex';
@@ -52,12 +56,8 @@
             } else {
                 document.getElementById('gameContainer').style.display = 'grid';
                 document.getElementById('roomDisplayId').textContent = roomId;
-                
-                // GMだけメニューを表示
                 if (isGM) {
-                    document.querySelectorAll('.gm-only').forEach(el => {
-                        el.style.setProperty('display', 'block', 'important');
-                    });
+                    document.querySelectorAll('.gm-only').forEach(el => el.style.setProperty('display', 'block', 'important'));
                 }
                 startApp(apiKey);
             }
@@ -69,11 +69,11 @@
                 urlParams.set('k', val);
                 window.location.search = urlParams.toString();
             } else {
-                alert("正しいAPIキーを入力してください");
+                alert("APIキーはAIzaから始まる形式で入力してください");
             }
         };
 
-        function startApp(validKey) {
+        async function startApp(validKey) {
             const firebaseConfig = {
                 apiKey: validKey,
                 authDomain: "herd-tool.firebaseapp.com",
@@ -86,6 +86,20 @@
 
             const app = initializeApp(firebaseConfig);
             const db = getDatabase(app);
+            const auth = getAuth(app);
+
+            // 【重要】匿名ログインを実行し、失敗したら画面を遮断する
+            try {
+                await signInAnonymously(auth);
+                console.log("認証成功");
+            } catch (error) {
+                console.error("認証エラー:", error);
+                document.getElementById('errorOverlay').style.display = 'flex';
+                document.getElementById('gameContainer').style.display = 'none';
+                document.getElementById('lobbyContainer').style.display = 'none';
+                return; // 以降の処理を中止
+            }
+
             const gameRef = roomId ? ref(db, 'rooms/' + roomId) : null;
 
             // --- 関数定義 ---
@@ -141,7 +155,6 @@
             window.resetAnswers = () => { if(confirm("回答を消去してお題をリセットしますか？")) { remove(ref(db, `rooms/${roomId}/answers`)); update(gameRef, { status: 'waiting', topic: "" }); } };
             window.unlockName = () => { const i = document.getElementById('userName'); i.readOnly = false; i.style.background = "#fff"; document.getElementById('editNameBtn').style.display = 'none'; };
 
-            // スコア確定
             window.confirmScore = () => {
                 const winners = Array.from(document.querySelectorAll('.player-tile.selected')).map(el => el.textContent);
                 const newCow = document.getElementById('cowSelect').value;
@@ -151,15 +164,12 @@
                 });
             };
 
-            // 全リセット
             window.resetAll = () => { if(confirm("全データをリセットしますか？")) set(gameRef, { round: 1, history: [], cowHolder: "なし", topic: "", status: "waiting", answers: {}, players: {}, createdAt: Date.now() }); };
 
-            // --- リアルタイム同期 ---
             if (roomId) {
                 onValue(gameRef, (snapshot) => {
                     const data = snapshot.val();
                     if (!data) return;
-                    
                     window.currentHistory = data.history || [];
                     window.currentRound = data.round || 1;
                     window.currentCowHolder = data.cowHolder || "なし";
@@ -183,7 +193,6 @@
                             document.getElementById('userAnswer').value = "";
                         }
                     }
-
                     const players = Object.keys(window.currentPlayers).sort();
                     refreshScoreDisplay(players, window.currentHistory, window.currentCowHolder);
                     if(isGM) updateGMControls(players, window.currentCowHolder);
@@ -213,12 +222,19 @@
 </head>
 <body>
 
+<div id="errorOverlay">
+    <h1 style="font-size: 3rem;">🚫</h1>
+    <h2>アクセス権限がありません</h2>
+    <p>APIキーが正しくないか、許可されていない場所からのアクセスです。</p>
+    <button onclick="location.href=location.pathname" style="width: auto; padding: 10px 20px;">設定をやり直す</button>
+</div>
+
 <div id="configModal" class="modal-overlay">
     <div class="card" style="max-width: 400px; width: 90%; text-align: center;">
         <h1>🐄</h1>
-        <h2>Firebase設定が必要です</h2>
+        <h2>Firebase APIキーを入力</h2>
         <input type="password" id="apiKeyInput" placeholder="AIzaSy...">
-        <button onclick="saveApiKey()" style="background:var(--success); margin-top:10px;">設定を適用して開始</button>
+        <button onclick="saveApiKey()" style="background:var(--success); margin-top:10px;">接続</button>
     </div>
 </div>
 
